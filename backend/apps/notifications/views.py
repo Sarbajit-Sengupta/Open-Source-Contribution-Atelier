@@ -1,10 +1,16 @@
+from typing import Any, cast
+
 from django.db import transaction
 from rest_framework import generics, pagination, permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import Notification, NotificationPreference, PushSubscription
-from .serializers import NotificationSerializer, PushSubscriptionSerializer
+from .serializers import (
+    NotificationDigestPreferencesSerializer,
+    NotificationSerializer,
+    PushSubscriptionSerializer,
+)
 
 
 class NotificationPagination(pagination.PageNumberPagination):
@@ -29,10 +35,17 @@ class NotificationPrefsView(APIView):
                 "websocket": prefs.websocket_enabled,
                 "receive_weekly_digest": receive_weekly_digest,
                 "weekly_digest": receive_weekly_digest,
+                **cast(
+                    dict[str, Any], NotificationDigestPreferencesSerializer(prefs).data
+                ),
             }
         )
 
     def put(self, request):
+        digest_settings = NotificationDigestPreferencesSerializer(
+            data=request.data, partial=True
+        )
+        digest_settings.is_valid(raise_exception=True)
         with transaction.atomic():
             prefs = (
                 NotificationPreference.objects.select_for_update()
@@ -53,9 +66,22 @@ class NotificationPrefsView(APIView):
                 prefs.websocket_enabled = request.data.get(
                     "websocket", request.data.get("websocket_enabled")
                 )
+            for field, value in cast(
+                dict[str, Any], digest_settings.validated_data
+            ).items():
+                setattr(prefs, field, value)
             prefs.save(
-                update_fields=["email_enabled", "in_app_enabled", "websocket_enabled"]
+                update_fields=[
+                    "email_enabled",
+                    "in_app_enabled",
+                    "websocket_enabled",
+                    "digest_frequency",
+                    "digest_time",
+                ]
             )
+            from .digests import cancel_disabled_weekly_deliveries
+
+            cancel_disabled_weekly_deliveries(prefs)
 
             if (
                 "receive_weekly_digest" in request.data
@@ -84,6 +110,9 @@ class NotificationPrefsView(APIView):
                 "websocket": prefs.websocket_enabled,
                 "receive_weekly_digest": receive_weekly_digest,
                 "weekly_digest": receive_weekly_digest,
+                **cast(
+                    dict[str, Any], NotificationDigestPreferencesSerializer(prefs).data
+                ),
             }
         )
 

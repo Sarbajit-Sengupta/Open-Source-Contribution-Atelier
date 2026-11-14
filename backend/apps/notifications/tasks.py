@@ -232,6 +232,11 @@ def send_notification_digests():
     current_batch: list = []
 
     for pref in prefs:
+        if pref.digest_frequency == "weekly":
+            from .digests import queue_weekly_digest
+
+            queue_weekly_digest(pref.pk)
+            continue
         if not pref.digest_time:
             continue
 
@@ -452,7 +457,7 @@ def _skip_finished(delivery_id: int):
     if delivery is None:
         logger.error("NotificationDelivery #%s does not exist", delivery_id)
         return False
-    if delivery.status in FINISHED_STATUSES:
+    if delivery.status in FINISHED_STATUSES or delivery.status == "cancelled":
         NotificationAttempt.objects.create(
             delivery=delivery,
             attempt_number=delivery.attempts.count() + 1,
@@ -506,6 +511,16 @@ def process_notification_delivery(
     if payload and not delivery.payload:
         delivery.payload = payload
     payload = dict(payload or delivery.payload or {})
+
+    from .digests import digest_delivery_allowed
+
+    if not digest_delivery_allowed(delivery):
+        delivery.status = "cancelled"
+        delivery.error_message = "Weekly notification digest disabled before delivery"
+        delivery.claimed_at = None
+        delivery.next_retry_at = None
+        delivery.save()
+        return True
 
     now = timezone.now()
     started_mono = time.monotonic()
@@ -764,6 +779,8 @@ def dispatch_notification(
             "slack": False,
         }
 
+    from .digests import is_high_priority
+
     registered = get_registered_channels()
     deliveries = []
     payloads = {}
@@ -791,6 +808,8 @@ def dispatch_notification(
             }
 
             for channel_id in registered.keys():
+                if channel_id == "email" and not pref.email_enabled:
+                    continue
                 if type_prefs.get(channel_id, False) or (
                     channel_id == "in_app" and type_prefs.get("in_app", True)
                 ):
@@ -798,7 +817,13 @@ def dispatch_notification(
                         notification=notification,
                         recipient=recipient,
                         channel=channel_id,
-                        status="pending",
+                        status=(
+                            "digest_pending"
+                            if channel_id == "email"
+                            and pref.digest_frequency == "weekly"
+                            and not is_high_priority(meta)
+                            else "pending"
+                        ),
                         meta=meta,
                         dedupe_key=dedupe_key or None,
                         payload=payload,
@@ -816,6 +841,8 @@ def dispatch_notification(
         raise
 
     for delivery in deliveries:
+        if delivery.status == "digest_pending":
+            continue
         payload = payloads[delivery.id]
         if getattr(settings, "CELERY_TASK_ALWAYS_EAGER", True) or getattr(
             settings, "TESTING", False

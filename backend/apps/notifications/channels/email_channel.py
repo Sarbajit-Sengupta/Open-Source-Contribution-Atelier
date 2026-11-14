@@ -40,7 +40,28 @@ class EmailChannel(NotificationChannel):
             "delivery": delivery,
         }
 
-        template_name = f"notifications/{notif_type}_email.html"
+        if notif_type == "notification_digest":
+            from django.utils.dateparse import parse_datetime
+
+            digest = payload.get("digest", {})
+            grouped = {}
+            for kind, items in digest.get("grouped_notifications", {}).items():
+                grouped[kind] = [
+                    {**item, "created_at": parse_datetime(item["created_at"])}
+                    for item in items
+                ]
+            context.update(
+                user=recipient,
+                grouped_notifications=grouped,
+                total_count=digest.get("total_count", 0),
+                omitted_count=digest.get("omitted_count", 0),
+            )
+
+        template_name = (
+            "notifications/email/digest.html"
+            if notif_type == "notification_digest"
+            else f"notifications/{notif_type}_email.html"
+        )
         try:
             html_content = render_to_string(template_name, context)
         except Exception as e:
